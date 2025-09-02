@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import puppeteer, { Browser } from "puppeteer-core"  // use puppeteer-core
+import * as puppeteer from 'puppeteer'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -72,7 +72,7 @@ export async function POST(req: Request) {
       const consentBtn = await page.$('#onetrust-accept-btn-handler')
       if (consentBtn) {
         await consentBtn.click()
-        await page.waitForTimeout(800)
+        await new Promise(resolve => setTimeout(resolve, 800))
       }
     } catch {}
 
@@ -100,7 +100,7 @@ export async function POST(req: Request) {
             }, 150)
           })
         })
-        await page.waitForTimeout(800)
+        await new Promise(resolve => setTimeout(resolve, 800))
       } catch {}
       const data = await page.$$eval(
         listItemSelector!,
