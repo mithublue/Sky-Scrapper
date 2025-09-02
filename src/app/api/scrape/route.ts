@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import puppeteer from 'puppeteer'
+import puppeteer, { Browser } from "puppeteer-core"  // use puppeteer-core
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
