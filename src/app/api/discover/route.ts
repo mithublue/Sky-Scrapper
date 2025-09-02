@@ -56,7 +56,7 @@ export async function POST(req: Request) {
       const consentBtn = await page.$('#onetrust-accept-btn-handler')
       if (consentBtn) {
         await consentBtn.click()
-        await page.waitForTimeout(500)
+        await new Promise(resolve => setTimeout(resolve, 500))
       }
     } catch {}
 
