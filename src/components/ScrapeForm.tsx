@@ -13,6 +13,15 @@ type Mode = 'single' | 'list'
 
 type Result = { ok: boolean; data?: any; count?: number; error?: string; mode?: Mode }
 
+type Suggestion = {
+  name: string
+  selector: string
+  type: 'text' | 'attr'
+  attr?: string
+  confidence: number
+  source: string
+}
+
 export default function ScrapeForm() {
   const [url, setUrl] = React.useState<string>('')
   const [mode, setMode] = React.useState<Mode>('list')
@@ -26,6 +35,10 @@ export default function ScrapeForm() {
   const [loading, setLoading] = React.useState(false)
   const [result, setResult] = React.useState<Result | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  const [discovering, setDiscovering] = React.useState<boolean>(false)
+  const [discoverError, setDiscoverError] = React.useState<string | null>(null)
+  const [suggestions, setSuggestions] = React.useState<Suggestion[]>([])
+  const [suggestedListItemSelector, setSuggestedListItemSelector] = React.useState<string | null>(null)
 
   const bookingDemo = () => {
     setUrl('https://www.booking.com/searchresults.html?ss=Saudi+Arabia&ssne=Saudi+Arabia&ssne_untouched=Saudi+Arabia&label=gen173nr-10CAEoggI46AdIM1gEaBSIAQGYATO4ARfIAQzYAQPoAQH4AQGIAgGoAgG4AoDA1sUGwAIB0gIkOWY5ZTg1MmItODlkMi00NTYxLTg5MjUtNTIyMWRjYjg1NDRj2AIB4AIB&aid=304142&lang=en-us&sb=1&src_elem=sb&src=index&dest_id=186&dest_type=country&group_adults=2&no_rooms=1&group_children=0')
@@ -44,6 +57,42 @@ export default function ScrapeForm() {
   const addField = () => setFields(prev => [...prev, { name: '', selector: '', type: 'text' }])
   const removeField = (idx: number) => setFields(prev => prev.filter((_, i) => i !== idx))
   const updateField = (idx: number, patch: Partial<Field>) => setFields(prev => prev.map((f, i) => i === idx ? { ...f, ...patch } : f))
+
+  const addFieldFromSuggestion = (s: Suggestion) => {
+    // Avoid duplicates by name+selector
+    const exists = fields.some(f => f.name === s.name && f.selector === s.selector && f.type === s.type && (f.attr || '') === (s.attr || ''))
+    if (exists) return
+    setFields(prev => [...prev, { name: s.name, selector: s.selector, type: s.type, attr: s.attr }])
+  }
+
+  const applySuggestedListSelector = () => {
+    if (!suggestedListItemSelector) return
+    setMode('list')
+    setListItemSelector(suggestedListItemSelector)
+  }
+
+  const discover = async () => {
+    if (!url) return
+    setDiscovering(true)
+    setDiscoverError(null)
+    try {
+      const res = await fetch('/api/discover', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      })
+      const json = await res.json()
+      if (!res.ok || !json?.ok) throw new Error(json?.error || 'Failed to discover')
+      setSuggestions(Array.isArray(json.suggestions) ? json.suggestions : [])
+      setSuggestedListItemSelector(json.listItemSelector || null)
+    } catch (e: any) {
+      setDiscoverError(e?.message || 'Discovery failed')
+      setSuggestions([])
+      setSuggestedListItemSelector(null)
+    } finally {
+      setDiscovering(false)
+    }
+  }
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -93,7 +142,13 @@ export default function ScrapeForm() {
         <div className="grid gap-3 md:grid-cols-3">
           <label className="md:col-span-2">
             <div className="mb-1 text-sm font-medium">URL</div>
-            <input required type="url" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://example.com" className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200" />
+            <div className="flex items-center gap-2">
+              <input required type="url" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://example.com" className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200" />
+              <button type="button" onClick={discover} disabled={!url || discovering} className="whitespace-nowrap rounded border px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50">
+                {discovering ? 'Discovering…' : 'Auto Discover fetchable data'}
+              </button>
+            </div>
+            {discoverError && <div className="mt-1 text-xs text-red-600">{discoverError}</div>}
           </label>
           <label>
             <div className="mb-1 text-sm font-medium">Mode</div>
@@ -103,6 +158,36 @@ export default function ScrapeForm() {
             </select>
           </label>
         </div>
+
+        {(suggestions.length > 0 || suggestedListItemSelector) && (
+          <div className="space-y-2 rounded border border-dashed p-3">
+            {suggestedListItemSelector && (
+              <div className="flex items-center gap-2 text-sm">
+                <span className="font-medium">Suggested list item selector:</span>
+                <code className="rounded bg-gray-100 px-1.5 py-0.5">{suggestedListItemSelector}</code>
+                <button type="button" onClick={applySuggestedListSelector} className="rounded border px-2 py-1 text-xs hover:bg-gray-50">Apply</button>
+              </div>
+            )}
+            {suggestions.length > 0 && (
+              <div className="space-y-1">
+                <div className="text-sm font-medium">Suggested fields</div>
+                <div className="flex flex-wrap gap-2">
+                  {suggestions.map((s, i) => (
+                    <button
+                      key={`${s.name}-${s.selector}-${i}`}
+                      type="button"
+                      onClick={() => addFieldFromSuggestion(s)}
+                      className="rounded-full border px-3 py-1 text-xs hover:bg-gray-50"
+                      title={`${s.selector}${s.type === 'attr' && s.attr ? ` [attr=${s.attr}]` : ''}`}
+                    >
+                      {s.name} <span className="text-gray-500">({s.selector}{s.type === 'attr' && s.attr ? ` @${s.attr}` : ''})</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {mode === 'list' && (
           <>
