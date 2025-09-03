@@ -9,9 +9,7 @@ type Field = {
   attr?: string
 }
 
-type Mode = 'single' | 'list'
-
-type Result = { ok: boolean; data?: any; count?: number; error?: string; mode?: Mode }
+type Result = { ok: boolean; data?: any; count?: number; error?: string; mode?: 'single' | 'list' }
 
 type Suggestion = {
   name: string
@@ -24,11 +22,9 @@ type Suggestion = {
 
 export default function ScrapeForm() {
   const [url, setUrl] = React.useState<string>('')
-  const [mode, setMode] = React.useState<Mode>('list')
   const [listItemSelector, setListItemSelector] = React.useState<string>('')
   const [limit, setLimit] = React.useState<number | ''>('')
-  const [deepSearch, setDeepSearch] = React.useState<boolean>(false)
-  const [detailUrlFieldName, setDetailUrlFieldName] = React.useState<string>('')
+  const [offset, setOffset] = React.useState<number | ''>('')
   const [fields, setFields] = React.useState<Field[]>([
     { name: 'title', selector: '', type: 'text' },
   ])
@@ -42,7 +38,6 @@ export default function ScrapeForm() {
 
   const bookingDemo = () => {
     setUrl('https://www.booking.com/searchresults.html?ss=Saudi+Arabia&ssne=Saudi+Arabia&ssne_untouched=Saudi+Arabia&label=gen173nr-10CAEoggI46AdIM1gEaBSIAQGYATO4ARfIAQzYAQPoAQH4AQGIAgGoAgG4AoDA1sUGwAIB0gIkOWY5ZTg1MmItODlkMi00NTYxLTg5MjUtNTIyMWRjYjg1NDRj2AIB4AIB&aid=304142&lang=en-us&sb=1&src_elem=sb&src=index&dest_id=186&dest_type=country&group_adults=2&no_rooms=1&group_children=0')
-    setMode('list')
     setListItemSelector('div[data-testid="property-card"]')
     setFields([
       { name: 'name', selector: 'div[data-testid="title"]', type: 'text' },
@@ -50,8 +45,6 @@ export default function ScrapeForm() {
       { name: 'price', selector: 'span[data-testid="price-and-discounted-price"]', type: 'text' },
       { name: 'rating', selector: 'div[data-testid="review-score"] div', type: 'text' },
     ])
-    setDeepSearch(false)
-    setDetailUrlFieldName('link')
   }
 
   const addField = () => setFields(prev => [...prev, { name: '', selector: '', type: 'text' }])
@@ -67,9 +60,10 @@ export default function ScrapeForm() {
 
   const applySuggestedListSelector = () => {
     if (!suggestedListItemSelector) return
-    setMode('list')
     setListItemSelector(suggestedListItemSelector)
   }
+
+  
 
   const discover = async () => {
     if (!url) return
@@ -100,14 +94,18 @@ export default function ScrapeForm() {
     setError(null)
     setResult(null)
     try {
+      // Basic validation for simplified flow
+      if (!url) throw new Error('URL is required')
+      if (!fields.length) throw new Error('Add at least one field')
+      if (!listItemSelector) throw new Error('List item selector is required')
+
       const payload = {
         url,
-        mode,
-        listItemSelector: mode === 'list' ? listItemSelector : undefined,
+        mode: 'list' as const,
+        listItemSelector,
         fields,
-        limit: mode === 'list' && typeof limit === 'number' ? limit : undefined,
-        deepSearch: mode === 'list' ? deepSearch : undefined,
-        detailUrlFieldName: mode === 'list' && deepSearch ? detailUrlFieldName : undefined,
+        limit: typeof limit === 'number' ? limit : undefined,
+        offset: typeof offset === 'number' ? offset : undefined,
       }
       const res = await fetch('/api/scrape', {
         method: 'POST',
@@ -140,7 +138,7 @@ export default function ScrapeForm() {
 
       <form onSubmit={onSubmit} className="space-y-4 rounded border bg-white p-4 shadow-sm">
         <div className="grid gap-3 md:grid-cols-3">
-          <label className="md:col-span-2">
+          <label className="md:col-span-3">
             <div className="mb-1 text-sm font-medium">URL</div>
             <div className="flex items-center gap-2">
               <input required type="url" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://example.com" className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200" />
@@ -149,13 +147,6 @@ export default function ScrapeForm() {
               </button>
             </div>
             {discoverError && <div className="mt-1 text-xs text-red-600">{discoverError}</div>}
-          </label>
-          <label>
-            <div className="mb-1 text-sm font-medium">Mode</div>
-            <select value={mode} onChange={e => setMode(e.target.value as Mode)} className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200">
-              <option value="single">Single</option>
-              <option value="list">List (loop)</option>
-            </select>
           </label>
         </div>
 
@@ -189,59 +180,57 @@ export default function ScrapeForm() {
           </div>
         )}
 
-        {mode === 'list' && (
-          <>
-            <div className="grid gap-3 md:grid-cols-3">
-              <label className="md:col-span-2">
-                <div className="mb-1 text-sm font-medium">List item selector</div>
-                <input required value={listItemSelector} onChange={e => setListItemSelector(e.target.value)} placeholder="CSS selector for each item (e.g. div.card)" className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200" />
-              </label>
-              <label>
-                <div className="mb-1 text-sm font-medium">Max items (optional)</div>
-                <input
-                  type="number"
-                  min={1}
-                  value={limit}
-                  onChange={e => {
-                    const v = e.target.value
-                    if (v === '') return setLimit('')
-                    const num = Number(v)
-                    setLimit(Number.isFinite(num) && num > 0 ? Math.floor(num) : '')
-                  }}
-                  placeholder="e.g. 20"
-                  className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200"
-                />
-              </label>
-            </div>
+        {/* Explicit List Item Selector input */}
+        <div>
+          <label className="block">
+            <div className="mb-1 text-sm font-medium">List item selector</div>
+            <input
+              required
+              type="text"
+              value={listItemSelector}
+              onChange={e => setListItemSelector(e.target.value)}
+              placeholder="e.g. div[data-testid='property-card'] or li.product"
+              className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200"
+            />
+            <div className="mt-1 text-xs text-gray-500">CSS selector that matches each item in the list/grid.</div>
+          </label>
+        </div>
 
-            <div className="grid gap-3 md:grid-cols-3">
-              <label className="flex items-center gap-2 md:col-span-2">
-                <input
-                  type="checkbox"
-                  checked={deepSearch}
-                  onChange={e => setDeepSearch(e.target.checked)}
-                  className="h-4 w-4"
-                />
-                <span className="text-sm font-medium">Deep Search (open each item's URL and scrape detail page)</span>
-              </label>
-              <label>
-                <div className="mb-1 text-sm font-medium">Detail URL field</div>
-                <select
-                  value={detailUrlFieldName}
-                  onChange={e => setDetailUrlFieldName(e.target.value)}
-                  disabled={!deepSearch}
-                  className="w-full rounded border px-3 py-2 disabled:bg-gray-100 disabled:text-gray-400"
-                >
-                  <option value="">Select field containing URL</option>
-                  {fields.map((f) => (
-                    <option key={f.name || Math.random()} value={f.name}>{f.name || '(unnamed field)'}</option>
-                  ))}
-                </select>
-                <p className="mt-1 text-xs text-gray-500">Choose the field whose value is the link to the detail page (e.g., "link").</p>
-              </label>
-            </div>
-          </>
-        )}
+        {/* Simplified options: Item count and Offset only */}
+        <div className="grid gap-3 md:grid-cols-3">
+          <label>
+            <div className="mb-1 text-sm font-medium">Item count (optional)</div>
+            <input
+              type="number"
+              min={1}
+              value={limit}
+              onChange={e => {
+                const v = e.target.value
+                if (v === '') return setLimit('')
+                const num = Number(v)
+                setLimit(Number.isFinite(num) && num > 0 ? Math.floor(num) : '')
+              }}
+              placeholder="e.g. 100"
+              className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200"
+            />
+          </label>
+          <label>
+            <div className="mb-1 text-sm font-medium">Offset (optional)</div>
+            <input
+              type="number"
+              min={0}
+              value={offset}
+              onChange={e => {
+                const v = e.target.value
+                if (v === '') return setOffset('')
+                const num = Number(v)
+                setOffset(Number.isFinite(num) && num >= 0 ? Math.floor(num) : '')
+              }}
+              placeholder="e.g. 15"
+              className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200"
+            />
+          </label>
+        </div>
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">

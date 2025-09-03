@@ -19,6 +19,8 @@ type DiscoverResult = {
   mode: 'single' | 'list' | 'unknown'
   listItemSelector?: string
   suggestions: Suggestion[]
+  nextButtonSelector?: string
+  prevButtonSelector?: string
 } | { ok: false; error: string }
 
 type Body = {
@@ -160,8 +162,32 @@ export async function POST(req: Request) {
         }
       }
 
+      // Discover pagination controls
+      const findNext = (): string | undefined => {
+        const order = [
+          'a[rel="next"]',
+          'link[rel="next"]',
+          'a[aria-label*="Next" i]',
+          'button[aria-label*="Next" i]',
+        ]
+        for (const sel of order) { if (document.querySelector(sel)) return sel }
+        // Avoid returning non-standard or overly broad selectors
+        return undefined
+      }
+      const findPrev = (): string | undefined => {
+        const order = [
+          'a[rel="prev"]',
+          'a[aria-label*="Prev" i], a[aria-label*="Previous" i]',
+          'button[aria-label*="Prev" i], button[aria-label*="Previous" i]',
+        ]
+        for (const sel of order) { if (document.querySelector(sel)) return sel }
+        return undefined
+      }
+
+      const nextButtonSelector = findNext()
+      const prevButtonSelector = findPrev()
       const mode: 'single' | 'list' | 'unknown' = listItemSelector ? 'list' : (suggestions.length ? 'single' : 'unknown')
-      return { mode, listItemSelector, suggestions }
+      return { mode, listItemSelector, suggestions, nextButtonSelector, prevButtonSelector }
     })
 
     const payload: DiscoverResult = {
@@ -169,6 +195,8 @@ export async function POST(req: Request) {
       mode: res.mode,
       listItemSelector: res.listItemSelector,
       suggestions: res.suggestions,
+      nextButtonSelector: res.nextButtonSelector,
+      prevButtonSelector: res.prevButtonSelector,
     }
 
     return NextResponse.json(payload)
