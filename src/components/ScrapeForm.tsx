@@ -9,6 +9,17 @@ type Field = {
   attr?: string
 }
 
+type PaginationInfo = {
+  type: 'infinite_scroll' | 'traditional_pagination' | 'load_more_button' | 'none'
+  nextButtonSelector?: string
+  prevButtonSelector?: string
+  pageNumberSelectors?: string[]
+  loadMoreSelector?: string
+  hasNumberedPages?: boolean
+  totalPagesSelector?: string
+  currentPageSelector?: string
+}
+
 type Result = { ok: boolean; data?: any; count?: number; error?: string; mode?: 'single' | 'list' }
 
 type Suggestion = {
@@ -18,6 +29,14 @@ type Suggestion = {
   attr?: string
   confidence: number
   source: string
+}
+
+type DiscoveryResult = {
+  ok: boolean
+  suggestions?: Suggestion[]
+  listItemSelector?: string
+  pagination?: PaginationInfo
+  error?: string
 }
 
 export default function ScrapeForm() {
@@ -35,6 +54,10 @@ export default function ScrapeForm() {
   const [discoverError, setDiscoverError] = React.useState<string | null>(null)
   const [suggestions, setSuggestions] = React.useState<Suggestion[]>([])
   const [suggestedListItemSelector, setSuggestedListItemSelector] = React.useState<string | null>(null)
+  const [paginationInfo, setPaginationInfo] = React.useState<PaginationInfo | null>(null)
+  const [paginationStrategy, setPaginationStrategy] = React.useState<'auto' | 'infinite_scroll' | 'traditional_pagination' | 'load_more_button' | 'none'>('auto')
+  const [customNextSelector, setCustomNextSelector] = React.useState<string>('')
+  const [customLoadMoreSelector, setCustomLoadMoreSelector] = React.useState<string>('')
 
   const bookingDemo = () => {
     setUrl('https://www.booking.com/searchresults.html?ss=Saudi+Arabia&ssne=Saudi+Arabia&ssne_untouched=Saudi+Arabia&label=gen173nr-10CAEoggI46AdIM1gEaBSIAQGYATO4ARfIAQzYAQPoAQH4AQGIAgGoAgG4AoDA1sUGwAIB0gIkOWY5ZTg1MmItODlkMi00NTYxLTg5MjUtNTIyMWRjYjg1NDRj2AIB4AIB&aid=304142&lang=en-us&sb=1&src_elem=sb&src=index&dest_id=186&dest_type=country&group_adults=2&no_rooms=1&group_children=0')
@@ -45,6 +68,20 @@ export default function ScrapeForm() {
       { name: 'price', selector: 'span[data-testid="price-and-discounted-price"]', type: 'text' },
       { name: 'rating', selector: 'div[data-testid="review-score"] div', type: 'text' },
     ])
+    setPaginationStrategy('infinite_scroll')
+  }
+
+  const alibabaDemo = () => {
+    setUrl('https://www.alibaba.com/search/page?spm=a2700.product_home_fy25.home_login_first_screen_fy23_pc_search_bar.keydown__Enter&SearchScene=proSearch&SearchText=mobile&pro=true&from=pcHomeContent')
+    setListItemSelector('.organic-offer-wrapper, .product-item, [class*="product-card"], .search-card-container')
+    setFields([
+      { name: 'title', selector: '.product-title, .title, h2, h3, [class*="title"]', type: 'text' },
+      { name: 'price', selector: '.price, .product-price, [class*="price"]', type: 'text' },
+      { name: 'supplier', selector: '.supplier, .company-name, [class*="supplier"]', type: 'text' },
+      { name: 'image', selector: 'img', type: 'attr', attr: 'src' },
+      { name: 'link', selector: 'a', type: 'attr', attr: 'href' },
+    ])
+    setPaginationStrategy('traditional_pagination')
   }
 
   const addField = () => setFields(prev => [...prev, { name: '', selector: '', type: 'text' }])
@@ -75,14 +112,27 @@ export default function ScrapeForm() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url }),
       })
-      const json = await res.json()
+      const json: DiscoveryResult = await res.json()
       if (!res.ok || !json?.ok) throw new Error(json?.error || 'Failed to discover')
       setSuggestions(Array.isArray(json.suggestions) ? json.suggestions : [])
       setSuggestedListItemSelector(json.listItemSelector || null)
+      setPaginationInfo(json.pagination || null)
+      
+      // Auto-set pagination strategy based on discovery
+      if (json.pagination) {
+        setPaginationStrategy(json.pagination.type === 'none' ? 'infinite_scroll' : json.pagination.type)
+        if (json.pagination.nextButtonSelector) {
+          setCustomNextSelector(json.pagination.nextButtonSelector)
+        }
+        if (json.pagination.loadMoreSelector) {
+          setCustomLoadMoreSelector(json.pagination.loadMoreSelector)
+        }
+      }
     } catch (e: any) {
       setDiscoverError(e?.message || 'Discovery failed')
       setSuggestions([])
       setSuggestedListItemSelector(null)
+      setPaginationInfo(null)
     } finally {
       setDiscovering(false)
     }
@@ -106,6 +156,10 @@ export default function ScrapeForm() {
         fields,
         limit: typeof limit === 'number' ? limit : undefined,
         offset: typeof offset === 'number' ? offset : undefined,
+        paginationStrategy,
+        nextButtonSelector: customNextSelector || paginationInfo?.nextButtonSelector,
+        loadMoreSelector: customLoadMoreSelector || paginationInfo?.loadMoreSelector,
+        pageNumberSelectors: paginationInfo?.pageNumberSelectors,
       }
       const res = await fetch('/api/scrape', {
         method: 'POST',
@@ -133,7 +187,8 @@ export default function ScrapeForm() {
     <div className="space-y-6">
       <div className="flex items-center gap-2">
         <button type="button" onClick={bookingDemo} className="rounded bg-indigo-600 px-3 py-1.5 text-white hover:bg-indigo-700">Load Booking.com demo</button>
-        <span className="text-sm text-gray-500">Prefills selectors for the provided Booking.com URL</span>
+        <button type="button" onClick={alibabaDemo} className="rounded bg-orange-600 px-3 py-1.5 text-white hover:bg-orange-700">Load Alibaba.com demo</button>
+        <span className="text-sm text-gray-500">Quick setup for common e-commerce sites</span>
       </div>
 
       <form onSubmit={onSubmit} className="space-y-4 rounded border bg-white p-4 shadow-sm">
@@ -150,18 +205,53 @@ export default function ScrapeForm() {
           </label>
         </div>
 
-        {(suggestions.length > 0 || suggestedListItemSelector) && (
-          <div className="space-y-2 rounded border border-dashed p-3">
+        {(suggestions.length > 0 || suggestedListItemSelector || paginationInfo) && (
+          <div className="space-y-3 rounded border border-dashed p-4">
+            <div className="text-sm font-medium text-gray-700">🔍 Auto-Discovery Results</div>
+            
             {suggestedListItemSelector && (
               <div className="flex items-center gap-2 text-sm">
-                <span className="font-medium">Suggested list item selector:</span>
+                <span className="font-medium">List item selector:</span>
                 <code className="rounded bg-gray-100 px-1.5 py-0.5">{suggestedListItemSelector}</code>
                 <button type="button" onClick={applySuggestedListSelector} className="rounded border px-2 py-1 text-xs hover:bg-gray-50">Apply</button>
               </div>
             )}
+            
+            {paginationInfo && paginationInfo.type !== 'none' && (
+              <div className="space-y-2">
+                <div className="text-sm font-medium text-gray-700">📄 Pagination Detected</div>
+                <div className="space-y-1 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">Type:</span>
+                    <span className="rounded bg-blue-100 px-2 py-0.5 text-blue-800">
+                      {paginationInfo.type.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                    </span>
+                  </div>
+                  {paginationInfo.nextButtonSelector && (
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">Next button:</span>
+                      <code className="rounded bg-gray-100 px-1.5 py-0.5">{paginationInfo.nextButtonSelector}</code>
+                    </div>
+                  )}
+                  {paginationInfo.loadMoreSelector && (
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">Load more:</span>
+                      <code className="rounded bg-gray-100 px-1.5 py-0.5">{paginationInfo.loadMoreSelector}</code>
+                    </div>
+                  )}
+                  {paginationInfo.hasNumberedPages && (
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">Page numbers:</span>
+                      <span className="text-green-600">✓ Detected</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+            
             {suggestions.length > 0 && (
               <div className="space-y-1">
-                <div className="text-sm font-medium">Suggested fields</div>
+                <div className="text-sm font-medium text-gray-700">🏷️ Suggested fields</div>
                 <div className="flex flex-wrap gap-2">
                   {suggestions.map((s, i) => (
                     <button
@@ -169,7 +259,7 @@ export default function ScrapeForm() {
                       type="button"
                       onClick={() => addFieldFromSuggestion(s)}
                       className="rounded-full border px-3 py-1 text-xs hover:bg-gray-50"
-                      title={`${s.selector}${s.type === 'attr' && s.attr ? ` [attr=${s.attr}]` : ''}`}
+                      title={`${s.selector}${s.type === 'attr' && s.attr ? ` [attr=${s.attr}]` : ''} (confidence: ${s.confidence})`}
                     >
                       {s.name} <span className="text-gray-500">({s.selector}{s.type === 'attr' && s.attr ? ` @${s.attr}` : ''})</span>
                     </button>
@@ -179,6 +269,55 @@ export default function ScrapeForm() {
             )}
           </div>
         )}
+
+        {/* Pagination Strategy Selection */}
+        <div className="space-y-3">
+          <div className="text-sm font-medium">📄 Pagination Strategy</div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <label>
+              <div className="mb-1 text-sm font-medium">Strategy</div>
+              <select 
+                value={paginationStrategy} 
+                onChange={e => setPaginationStrategy(e.target.value as any)}
+                className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200"
+              >
+                <option value="auto">🔍 Auto-detect</option>
+                <option value="infinite_scroll">📜 Infinite Scroll</option>
+                <option value="traditional_pagination">📄 Traditional Pagination</option>
+                <option value="load_more_button">🔘 Load More Button</option>
+                <option value="none">🚫 No Pagination</option>
+              </select>
+            </label>
+          </div>
+          
+          {(paginationStrategy === 'traditional_pagination' || paginationStrategy === 'auto') && (
+            <label>
+              <div className="mb-1 text-sm font-medium">Custom Next Button Selector (optional)</div>
+              <input
+                type="text"
+                value={customNextSelector}
+                onChange={e => setCustomNextSelector(e.target.value)}
+                placeholder="e.g. a[rel='next'], .pagination-next"
+                className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200"
+              />
+              <div className="mt-1 text-xs text-gray-500">Override auto-detected next button selector</div>
+            </label>
+          )}
+          
+          {(paginationStrategy === 'load_more_button' || paginationStrategy === 'auto') && (
+            <label>
+              <div className="mb-1 text-sm font-medium">Custom Load More Selector (optional)</div>
+              <input
+                type="text"
+                value={customLoadMoreSelector}
+                onChange={e => setCustomLoadMoreSelector(e.target.value)}
+                placeholder="e.g. button.load-more, .show-more-btn"
+                className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200"
+              />
+              <div className="mt-1 text-xs text-gray-500">Override auto-detected load more button selector</div>
+            </label>
+          )}
+        </div>
 
         {/* Explicit List Item Selector input */}
         <div>
@@ -213,6 +352,7 @@ export default function ScrapeForm() {
               placeholder="e.g. 100"
               className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200"
             />
+            <div className="mt-1 text-xs text-gray-500">Total number of items to scrape across all pages</div>
           </label>
           <label>
             <div className="mb-1 text-sm font-medium">Offset (optional)</div>
@@ -229,6 +369,7 @@ export default function ScrapeForm() {
               placeholder="e.g. 15"
               className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200"
             />
+            <div className="mt-1 text-xs text-gray-500">Number of items to skip before collecting data</div>
           </label>
         </div>
 
@@ -269,6 +410,11 @@ export default function ScrapeForm() {
           <button disabled={loading} type="submit" className="rounded bg-indigo-600 px-4 py-2 text-white hover:bg-indigo-700 disabled:opacity-50">
             {loading ? 'Scraping…' : 'Scrape'}
           </button>
+          {paginationStrategy !== 'none' && (
+            <div className="text-xs text-gray-500">
+              🔄 Will navigate through pages using {paginationStrategy.replace('_', ' ')} strategy
+            </div>
+          )}
           {error && <span className="text-sm text-red-600">{error}</span>}
         </div>
       </form>

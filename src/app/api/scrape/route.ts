@@ -14,15 +14,22 @@ type Field = {
   attr?: string
 }
 
-// Stealth: reduce obvious automation signals
+// Enhanced stealth: reduce obvious automation signals
 async function applyStealth(page: puppeteer.Page) {
   await page.evaluateOnNewDocument(() => {
+    // Remove webdriver property
     Object.defineProperty(navigator, 'webdriver', { get: () => false })
+    
+    // Add chrome runtime
     // @ts-ignore
     window.chrome = { runtime: {} }
+    
+    // Override language properties
     Object.defineProperty(navigator, 'language', { get: () => 'en-US' })
     Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] })
     Object.defineProperty(navigator, 'platform', { get: () => 'Win32' })
+    
+    // Override permissions
     const originalQuery = (window.navigator.permissions && window.navigator.permissions.query) as any
     if (originalQuery) {
       window.navigator.permissions.query = (parameters: any) => (
@@ -31,37 +38,104 @@ async function applyStealth(page: puppeteer.Page) {
           : originalQuery(parameters)
       )
     }
+    
+    // Override WebGL parameters to mimic real browser
     const getParameter = (WebGLRenderingContext as any).prototype.getParameter
     ;(WebGLRenderingContext as any).prototype.getParameter = function (parameter: any) {
       if (parameter === 37445) return 'Intel Inc.' // UNMASKED_VENDOR_WEBGL
       if (parameter === 37446) return 'Intel Iris OpenGL Engine' // UNMASKED_RENDERER_WEBGL
       return getParameter.call(this, parameter)
     }
+    
+    // Override plugins to look more real
     const originalPlugins = (navigator as any).plugins
     Object.defineProperty(navigator, 'plugins', {
-      get: () => [{ name: 'Chrome PDF Plugin' }, { name: 'Chrome PDF Viewer' }],
+      get: () => [
+        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+        { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+      ],
+    })
+    
+    // Remove automation scripts detection
+    Object.defineProperty(document, 'hidden', { get: () => false })
+    Object.defineProperty(document, 'visibilityState', { get: () => 'visible' })
+    
+    // Override hardwareConurrency to mimic real browser
+    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 4 })
+    
+    // Mock connection property
+    Object.defineProperty(navigator, 'connection', {
+      get: () => ({
+        effectiveType: '4g',
+        downlink: 2.5,
+        rtt: 150
+      })
     })
   })
 }
 
-// Try to accept cookie banners heuristically
+// Enhanced cookie banner handling for different websites
 async function acceptCookiesIfPresent(page: puppeteer.Page) {
   try {
     const selectors = [
+      // OneTrust (Booking.com)
       'button#onetrust-accept-btn-handler',
       "button[aria-label='Accept']",
       "button[data-testid='accept-cookies-button']",
       "button[aria-label='Accept all']",
       "button[aria-label='I agree']",
+      // Common cookie consent patterns
+      "button[id*='accept']",
+      "button[class*='accept']",
+      "button[class*='consent']",
+      "a[class*='accept']",
+      // Alibaba specific patterns
+      ".cookie-accept",
+      "[data-role='accept']",
+      "button:contains('Accept')",
+      "button:contains('I Accept')",
+      "button:contains('OK')",
+      "button:contains('同意')", // Chinese for 'agree'
+      "button:contains('确定')", // Chinese for 'confirm'
     ]
+    
     for (const sel of selectors) {
-      const btn = await page.$(sel)
-      if (btn) { await btn.click().catch(() => {}); await new Promise(r => setTimeout(r, 500)); return }
+      if (sel.includes(':contains')) {
+        // Handle text-based selectors
+        const clicked = await page.evaluate((text) => {
+          const buttons = Array.from(document.querySelectorAll('button, a[role="button"]'))
+          const targetText = text.replace('button:contains(\'', '').replace('\')', '')
+          const element = buttons.find(btn => {
+            const btnText = (btn.textContent || '').toLowerCase().trim()
+            return btnText.includes(targetText.toLowerCase())
+          }) as HTMLElement
+          
+          if (element) {
+            element.click()
+            return true
+          }
+          return false
+        }, sel)
+        
+        if (clicked) {
+          await new Promise(r => setTimeout(r, 1000))
+          return
+        }
+      } else {
+        const btn = await page.$(sel)
+        if (btn) {
+          await btn.click().catch(() => {})
+          await new Promise(r => setTimeout(r, 1000))
+          return
+        }
+      }
     }
+    
     // Fallback: scan visible buttons/links for accept-like text
     const clicked = await page.evaluate(() => {
       const nodes = Array.from(document.querySelectorAll('button, a[role="button"], a')) as HTMLElement[]
-      const phrases = ['accept', 'i agree', 'got it', 'agree & close']
+      const phrases = ['accept', 'i agree', 'got it', 'agree & close', 'ok', '同意', '确定', 'allow']
       for (const el of nodes) {
         const txt = (el.innerText || el.textContent || '').toLowerCase().trim()
         if (!txt || !phrases.some(p => txt.includes(p))) continue
@@ -70,9 +144,11 @@ async function acceptCookiesIfPresent(page: puppeteer.Page) {
       }
       return false
     })
-    if (clicked) { await new Promise(r => setTimeout(r, 500)) }
+    if (clicked) { await new Promise(r => setTimeout(r, 1000)) }
   } catch {}
 }
+
+type PaginationStrategy = 'infinite_scroll' | 'traditional_pagination' | 'load_more_button' | 'auto' | 'none'
 
 type Body = {
   url: string
@@ -89,13 +165,16 @@ type Body = {
   offset?: number
   nextButtonSelector?: string
   prevButtonSelector?: string
+  paginationStrategy?: PaginationStrategy
+  loadMoreSelector?: string
+  pageNumberSelectors?: string[]
 }
 
 export async function POST(req: Request) {
   let browser: puppeteer.Browser | null = null
   try {
     const body = (await req.json()) as Body
-    const { url, mode, listItemSelector, fields, waitForSelector, timeoutMs, limit, deepSearch, detailUrlFieldName, min, pages, offset, nextButtonSelector, prevButtonSelector } = body
+    const { url, mode, listItemSelector, fields, waitForSelector, timeoutMs, limit, deepSearch, detailUrlFieldName, min, pages, offset, nextButtonSelector, prevButtonSelector, paginationStrategy, loadMoreSelector, pageNumberSelectors } = body
 
     if (!url || !/^https?:\/\//i.test(url)) {
       return NextResponse.json({ ok: false, error: 'Valid url is required' }, { status: 400 })
@@ -119,7 +198,20 @@ export async function POST(req: Request) {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-blink-features=AutomationControlled',
+        '--disable-features=VizDisplayCompositor',
+        '--disable-extensions',
+        '--disable-plugins',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--no-pings',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-features=TranslateUI',
+        '--disable-ipc-flooding-protection',
         '--lang=en-US,en',
+        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       ],
     })
 
@@ -128,27 +220,83 @@ export async function POST(req: Request) {
     const navTimeout = Math.min(Math.max(timeoutMs ?? 60000, 10000), 120000)
     page.setDefaultNavigationTimeout(navTimeout)
     page.setDefaultTimeout(navTimeout)
+    
+    // Enhanced user agent with more realistic headers
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     )
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' })
+    await page.setExtraHTTPHeaders({ 
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Cache-Control': 'no-cache',
+      'Pragma': 'no-cache',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none',
+      'Upgrade-Insecure-Requests': '1'
+    })
 
-    // Stealth as early as possible
-    await applyStealth(page)
-
+    // Enhanced navigation with retry and error handling
     try {
-      await page.goto(url, { waitUntil: 'networkidle2' })
+      console.log(`Navigating to: ${url}`)
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: navTimeout })
     } catch (e) {
-      // Retry once if the first navigation fails
-      await page.goto(url, { waitUntil: 'networkidle2' })
+      console.log('First navigation attempt failed, retrying with domcontentloaded...')
+      try {
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navTimeout })
+      } catch (e2) {
+        console.log('Second navigation attempt failed, trying load event...')
+        await page.goto(url, { waitUntil: 'load', timeout: navTimeout })
+      }
     }
 
-    // Attempt to accept cookie consent if present (Booking.com typically uses OneTrust)
+    // Wait a bit for dynamic content to load
+    await new Promise(r => setTimeout(r, 2000))
+
+    // Attempt to accept cookie consent
     await acceptCookiesIfPresent(page)
 
+    // Smart selector waiting with multiple fallbacks
     const effectiveWaitFor = waitForSelector ?? (mode === 'list' ? listItemSelector! : undefined)
     if (effectiveWaitFor) {
-      await page.waitForSelector(effectiveWaitFor, { visible: true })
+      console.log(`Waiting for selector: ${effectiveWaitFor}`)
+      try {
+        await page.waitForSelector(effectiveWaitFor, { visible: true, timeout: 15000 })
+      } catch (e) {
+        console.log(`Primary selector failed, trying alternative approaches...`)
+        
+        // Try waiting for any content that looks like list items
+        if (mode === 'list') {
+          const alternativeSelectors = [
+            '[class*="product"]',
+            '[class*="item"]',
+            '[class*="card"]',
+            '[class*="result"]',
+            '[data-testid*="product"]',
+            '[data-testid*="item"]',
+            'article',
+            '.search-result',
+            '.listing'
+          ]
+          
+          let found = false
+          for (const altSel of alternativeSelectors) {
+            try {
+              await page.waitForSelector(altSel, { visible: true, timeout: 5000 })
+              console.log(`Found alternative selector: ${altSel}`)
+              found = true
+              break
+            } catch {}
+          }
+          
+          if (!found) {
+            console.log('No suitable selectors found, proceeding anyway...')
+            // Wait a bit more for dynamic content
+            await new Promise(r => setTimeout(r, 3000))
+          }
+        }
+      }
     }
 
     if (mode === 'list') {
@@ -159,14 +307,164 @@ export async function POST(req: Request) {
 
       const aggregate: Record<string, any>[] = []
       let currentPage = 1
+      let workingSelector = ''
       const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
+      // Auto-detect pagination strategy if not provided
+      let detectedPaginationInfo: any = null
+      if (paginationStrategy === 'auto' || !paginationStrategy) {
+        try {
+          console.log('Auto-detecting pagination strategy...')
+          detectedPaginationInfo = await page.evaluate(() => {
+            const info: any = {
+              hasLoadMore: false,
+              hasNumberedPages: false,
+              hasNextButton: false,
+              hasInfiniteScroll: false,
+              detectedSelectors: {}
+            }
+
+            // Check for load more buttons
+            const loadMorePatterns = [
+              'button[aria-label*="load more" i]',
+              'button[aria-label*="show more" i]',
+              'a[aria-label*="load more" i]',
+              '.load-more',
+              '.show-more'
+            ]
+            
+            for (const pattern of loadMorePatterns) {
+              const element = document.querySelector(pattern)
+              if (element) {
+                info.hasLoadMore = true
+                info.detectedSelectors.loadMore = pattern
+                break
+              }
+            }
+
+            // Check for text-based load more
+            if (!info.hasLoadMore) {
+              const buttons = Array.from(document.querySelectorAll('button, a[role="button"]'))
+              const loadMoreBtn = buttons.find(btn => {
+                const text = (btn.textContent || '').toLowerCase().trim()
+                return /\b(load more|show more|view more|see more)\b/.test(text)
+              })
+              if (loadMoreBtn) {
+                info.hasLoadMore = true
+                const classes = loadMoreBtn.className ? `.${loadMoreBtn.className.split(' ').join('.')}` : ''
+                const id = loadMoreBtn.id ? `#${loadMoreBtn.id}` : ''
+                const tagName = loadMoreBtn.tagName.toLowerCase()
+                info.detectedSelectors.loadMore = `${tagName}${id}${classes}`.trim() || `${tagName}:contains("Load More")`
+              }
+            }
+
+            // Check for numbered pagination
+            const paginationPatterns = [
+              '.pagination a',
+              '.page-numbers a',
+              'nav[aria-label*="pagination"] a',
+              'a[href*="page="]'
+            ]
+            
+            for (const pattern of paginationPatterns) {
+              const elements = Array.from(document.querySelectorAll(pattern))
+              const numberedElements = elements.filter(el => {
+                const text = el.textContent?.trim() || ''
+                return /^\d+$/.test(text) && parseInt(text) > 0
+              })
+              if (numberedElements.length >= 2) {
+                info.hasNumberedPages = true
+                info.detectedSelectors.pageNumbers = pattern
+                break
+              }
+            }
+
+            // Check for next button
+            const nextPatterns = [
+              'a[rel="next"]:not([disabled])',
+              'a[aria-label*="next" i]:not([disabled])',
+              'button[aria-label*="next" i]:not([disabled])',
+              '.next:not([disabled])'
+            ]
+            
+            for (const pattern of nextPatterns) {
+              if (document.querySelector(pattern)) {
+                info.hasNextButton = true
+                info.detectedSelectors.nextButton = pattern
+                break
+              }
+            }
+
+            // Check for infinite scroll indicators
+            info.hasInfiniteScroll = !!(
+              document.querySelector('[data-infinite-scroll]') ||
+              document.querySelector('.infinite-scroll') ||
+              document.querySelector('[data-scroll-loader]') ||
+              (window as any).InfiniteScroll ||
+              (window as any).LazyLoad
+            )
+
+            return info
+          })
+          
+          console.log('Detected pagination info:', detectedPaginationInfo)
+        } catch (e) {
+          console.log('Error detecting pagination:', e)
+        }
+      }
+
       const scrapeCurrentPage = async (): Promise<Record<string, any>[]> => {
-        await page.waitForSelector(listItemSelector!, { visible: true })
-        // Load more until we reach target count (offset + limit) or stagnate
+        // Try primary selector first, then fallbacks
+        const selectorVariants = [listItemSelector!]
+        
+        // Add common fallback selectors if primary fails
+        if (listItemSelector?.includes(',')) {
+          // If multiple selectors provided, try each one
+          selectorVariants.splice(0, 1, ...listItemSelector.split(',').map(s => s.trim()))
+        } else {
+          // Add fallback patterns
+          selectorVariants.push(
+            '[class*="product"]',
+            '[class*="item"]',
+            '[class*="card"]',
+            '[class*="result"]',
+            'article',
+            '.search-result',
+            '.listing'
+          )
+        }
+        
+        let elementsFound = 0
+        
+        // Find a selector that actually returns elements
+        for (const selector of selectorVariants) {
+          try {
+            const count = await page.$$eval(selector, els => els.length)
+            console.log(`Checking selector "${selector}": found ${count} elements`)
+            if (count > 0) {
+              workingSelector = selector
+              elementsFound = count
+              break
+            }
+          } catch (e: any) {
+            console.log(`Selector "${selector}" failed:`, e?.message || 'unknown error')
+          }
+        }
+        
+        if (!workingSelector) {
+          console.log('No working selector found, returning empty array')
+          return []
+        }
+        
+        console.log(`Using selector: "${workingSelector}" (${elementsFound} elements)`)
+        
+        await page.waitForSelector(workingSelector, { visible: true }).catch(() => {
+          console.log('waitForSelector failed, proceeding anyway')
+        })
+        // Enhanced loading and content discovery
         try {
           const getCount = async () => {
-            try { return await page.$$eval(listItemSelector!, els => els.length) } catch { return 0 }
+            try { return await page.$$eval(workingSelector, els => els.length) } catch { return 0 }
           }
           const remainingNeed = typeof maxItems === 'number' ? Math.max(maxItems - aggregate.length, 0) : undefined
           const desiredOnPageCount = typeof remainingNeed === 'number' ? (remainingNeed + skipRemaining) : undefined
@@ -256,20 +554,39 @@ export async function POST(req: Request) {
         } catch {}
 
         const pageData = await page.$$eval(
-          listItemSelector!,
+          workingSelector,
           (items, fields) => {
             const elements = Array.from(items as Element[])
-            return elements.map((item) => {
-              const obj: Record<string, any> = {}
+            console.log(`Processing ${elements.length} elements`)
+            return elements.map((item, index) => {
+              const obj: Record<string, any> = { _index: index }
               for (const f of fields as any[]) {
                 let value: any = null
-                const target = f.selector ? item.querySelector(f.selector) : item
-                if (target) {
-                  if (f.type === 'text') {
-                    value = target.textContent?.trim() ?? null
-                  } else if (f.type === 'attr' && f.attr) {
-                    value = target.getAttribute(f.attr)
+                try {
+                  // Handle multiple selectors separated by commas
+                  const selectors = f.selector.split(',').map((s: string) => s.trim())
+                  let target: Element | null = null
+                  
+                  for (const sel of selectors) {
+                    target = sel ? item.querySelector(sel) : item
+                    if (target) break
                   }
+                  
+                  if (target) {
+                    if (f.type === 'text') {
+                      value = target.textContent?.trim() ?? null
+                    } else if (f.type === 'attr' && f.attr) {
+                      value = target.getAttribute(f.attr)
+                      // Handle relative URLs
+                      if (f.attr === 'href' && value && !value.startsWith('http')) {
+                        try {
+                          value = new URL(value, window.location.href).href
+                        } catch {}
+                      }
+                    }
+                  }
+                } catch (e) {
+                  console.log(`Error extracting field ${f.name}:`, e)
                 }
                 obj[f.name] = value
               }
@@ -306,95 +623,312 @@ export async function POST(req: Request) {
 
       const getListSnapshot = async () => {
         try {
+          const currentSelector = workingSelector || listItemSelector!
           const snapshot = await page.evaluate((sel) => {
-            const items = Array.from(document.querySelectorAll(sel))
+            // Try multiple selectors if provided
+            const selectors = sel.includes(',') ? sel.split(',').map((s: string) => s.trim()) : [sel]
+            let items: Element[] = []
+            
+            for (const selector of selectors) {
+              try {
+                items = Array.from(document.querySelectorAll(selector))
+                if (items.length > 0) break
+              } catch {}
+            }
+            
             const firstText = (items[0]?.textContent || '').slice(0, 80)
             return { href: location.href, count: items.length, firstText }
-          }, listItemSelector!)
+          }, currentSelector)
           return snapshot as { href: string; count: number; firstText: string }
         } catch {
           return { href: '', count: 0, firstText: '' }
         }
       }
 
+      // Enhanced pagination navigation with multiple strategies
       const gotoNextPage = async (): Promise<boolean> => {
         try {
           const before = await getListSnapshot()
+          const strategy = paginationStrategy || 'auto'
 
-          // Prefer custom selector if provided
-          if (nextButtonSelector && nextButtonSelector.trim()) {
-            const acted = await page.evaluate((sel) => {
-              const el = document.querySelector(sel) as any
-              if (!el) return { type: 'none' }
-              if ((el instanceof HTMLAnchorElement || el instanceof HTMLLinkElement) && el.href) {
-                return { type: 'href', href: el.href as string }
-              }
-              ;(el as HTMLElement).click()
-              return { type: 'click' }
-            }, nextButtonSelector)
-
-            if ((acted as any).type === 'href') {
-              const href = (acted as any).href as string
-              try { await page.goto(href, { waitUntil: 'networkidle2' }) } catch { try { await page.goto(href, { waitUntil: 'networkidle2' }) } catch {} }
-              return true
-            }
-            if ((acted as any).type === 'click') {
-              // Wait for either navigation or list content change (supports load-more)
-              try { await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 3000 }) } catch {}
-              // Wait for list change
-              const started = Date.now()
-              while (Date.now() - started < 6000) {
-                const after = await getListSnapshot()
-                if (after.href !== before.href || after.count !== before.count || after.firstText !== before.firstText) {
-                  return true
+          // Auto-detect strategy if not specified
+          let detectedStrategy = strategy
+          let effectiveLoadMoreSelector = loadMoreSelector
+          let effectivePageNumberSelectors = pageNumberSelectors
+          let effectiveNextButtonSelector = nextButtonSelector
+          
+          if (strategy === 'auto') {
+            // Use detected pagination info if available
+            if (detectedPaginationInfo) {
+              if (detectedPaginationInfo.hasLoadMore) {
+                detectedStrategy = 'load_more_button'
+                // Update selectors from detection
+                if (!loadMoreSelector && detectedPaginationInfo.detectedSelectors.loadMore) {
+                  effectiveLoadMoreSelector = detectedPaginationInfo.detectedSelectors.loadMore
                 }
-                await new Promise(r => setTimeout(r, 300))
+              } else if (detectedPaginationInfo.hasNumberedPages) {
+                detectedStrategy = 'traditional_pagination'
+                if (!pageNumberSelectors && detectedPaginationInfo.detectedSelectors.pageNumbers) {
+                  effectivePageNumberSelectors = [detectedPaginationInfo.detectedSelectors.pageNumbers]
+                }
+              } else if (detectedPaginationInfo.hasNextButton) {
+                detectedStrategy = 'traditional_pagination'
+                if (!nextButtonSelector && detectedPaginationInfo.detectedSelectors.nextButton) {
+                  effectiveNextButtonSelector = detectedPaginationInfo.detectedSelectors.nextButton
+                }
+              } else if (detectedPaginationInfo.hasInfiniteScroll) {
+                detectedStrategy = 'infinite_scroll'
+              } else {
+                detectedStrategy = 'infinite_scroll' // Default fallback
               }
-              // If no visible change, still try fallback
+            } else {
+              // Fallback detection if page evaluation failed
+              if (loadMoreSelector && await page.$(loadMoreSelector)) {
+                detectedStrategy = 'load_more_button'
+              } else if (pageNumberSelectors?.length && await page.$(pageNumberSelectors[0])) {
+                detectedStrategy = 'traditional_pagination'
+              } else if (nextButtonSelector && await page.$(nextButtonSelector)) {
+                detectedStrategy = 'traditional_pagination'
+              } else {
+                detectedStrategy = 'infinite_scroll'
+              }
             }
           }
 
-          // Fallbacks: Try rel=next and common patterns
-          const nextHref = await page.evaluate(() => {
-            const relNext = document.querySelector('a[rel="next"]') as HTMLAnchorElement | null
-            if (relNext?.href) return relNext.href
-            const ariaNext = document.querySelector('a[aria-label*="Next" i]') as HTMLAnchorElement | null
-            if (ariaNext?.href) return ariaNext.href
-            const linkRelNext = document.querySelector('link[rel="next"]') as HTMLLinkElement | null
-            if (linkRelNext?.href) return linkRelNext.href
-            // Fallback: find an anchor with text containing Next
-            const anchors = Array.from(document.querySelectorAll('a')) as HTMLAnchorElement[]
-            const a = anchors.find(a => /\b(next|more)\b/i.test(a.textContent || '') && a.href)
-            return a?.href || null
-          })
-          if (nextHref) {
-            try {
-              await page.goto(nextHref as string, { waitUntil: 'networkidle2' })
-              return true
-            } catch {
-              try { await page.goto(nextHref as string, { waitUntil: 'networkidle2' }) } catch { return false }
-            }
+          console.log(`Using pagination strategy: ${detectedStrategy}`)
+
+          // Strategy: Load More Button
+          if (detectedStrategy === 'load_more_button') {
+            const success = await handleLoadMoreStrategy()
+            if (success) return success
+            // Fallback to other strategies if load more fails
+            detectedStrategy = 'traditional_pagination'
           }
 
-          // Try clickable next/load-more button by aria-label or text
-          const clicked = await page.evaluate(() => {
-            const byAria = document.querySelector('button[aria-label*="Next" i], button[aria-label*="More" i]') as HTMLButtonElement | null
-            if (byAria) { byAria.click(); return true }
-            const buttons = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[]
-            const btn = buttons.find(b => /\b(next|more|load more|show more)\b/i.test(b.textContent || ''))
-            if (btn) { btn.click(); return true }
-            return false
-          })
-          if (clicked) {
-            // Wait for list content to change
-            const started = Date.now()
-            while (Date.now() - started < 6000) {
-              const after = await getListSnapshot()
-              if (after.count !== before.count || after.firstText !== before.firstText) return true
-              await new Promise(r => setTimeout(r, 300))
-            }
+          // Strategy: Traditional Pagination (numbered pages or next/prev)
+          if (detectedStrategy === 'traditional_pagination') {
+            const success = await handleTraditionalPagination()
+            if (success) return success
+            // Fallback to infinite scroll if traditional pagination fails
+            detectedStrategy = 'infinite_scroll'
           }
+
+          // Strategy: Infinite Scroll
+          if (detectedStrategy === 'infinite_scroll') {
+            return await handleInfiniteScroll()
+          }
+
           return false
+
+          // Strategy implementations
+          async function handleLoadMoreStrategy(): Promise<boolean> {
+            try {
+              const selector = effectiveLoadMoreSelector || 'button:contains("Load More"), button:contains("Show More"), a:contains("Load More")'
+              
+              // Try to find and click load more button
+              const success = await page.evaluate((sel) => {
+                // Handle :contains selectors manually
+                if (sel.includes(':contains')) {
+                  const tagName = sel.split(':')[0]
+                  const textPattern = sel.match(/"([^"]+)"/)?.[1]?.toLowerCase() || ''
+                  const elements = Array.from(document.querySelectorAll(tagName))
+                  const element = elements.find(el => {
+                    const text = (el.textContent || '').toLowerCase().trim()
+                    return text.includes(textPattern)
+                  }) as HTMLElement
+                  
+                  if (element) {
+                    element.scrollIntoView({ behavior: 'auto', block: 'center' })
+                    element.click()
+                    return true
+                  }
+                  return false
+                } else {
+                  const el = document.querySelector(sel) as HTMLElement
+                  if (el) {
+                    el.scrollIntoView({ behavior: 'auto', block: 'center' })
+                    el.click()
+                    return true
+                  }
+                  return false
+                }
+              }, selector)
+
+              if (success) {
+                await sleep(2000) // Wait for content to load
+                
+                // Wait for list content change
+                const started = Date.now()
+                while (Date.now() - started < 10000) {
+                  const after = await getListSnapshot()
+                  if (after.count !== before.count || after.firstText !== before.firstText) {
+                    return true
+                  }
+                  await sleep(500)
+                }
+              }
+              return false
+            } catch {
+              return false
+            }
+          }
+
+          async function handleTraditionalPagination(): Promise<boolean> {
+            try {
+              // Try numbered pagination first
+              if (effectivePageNumberSelectors?.length) {
+                for (const selector of effectivePageNumberSelectors) {
+                  const success = await handleNumberedPagination(selector)
+                  if (success) return true
+                }
+              }
+
+              // Try next button navigation
+              return await handleNextButtonNavigation()
+            } catch {
+              return false
+            }
+          }
+
+          async function handleNumberedPagination(selector: string): Promise<boolean> {
+            try {
+              const nextPageNumber = await page.evaluate((sel) => {
+                const currentPageEl = document.querySelector('.pagination .active, .pagination .current, [aria-current="page"]')
+                const currentPage = currentPageEl ? parseInt(currentPageEl.textContent || '1') : 1
+                const nextPage = currentPage + 1
+                
+                // Find the next page link
+                const elements = Array.from(document.querySelectorAll(sel))
+                const nextPageEl = elements.find(el => {
+                  const text = el.textContent?.trim() || ''
+                  return text === nextPage.toString()
+                }) as HTMLElement
+                
+                if (nextPageEl) {
+                  nextPageEl.click()
+                  return nextPage
+                }
+                return null
+              }, selector)
+
+              if (nextPageNumber) {
+                try {
+                  await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 })
+                  return true
+                } catch {
+                  // If no navigation, check for content change
+                  const started = Date.now()
+                  while (Date.now() - started < 8000) {
+                    const after = await getListSnapshot()
+                    if (after.count !== before.count || after.firstText !== before.firstText) {
+                      return true
+                    }
+                    await sleep(500)
+                  }
+                }
+              }
+              return false
+            } catch {
+              return false
+            }
+          }
+
+          async function handleNextButtonNavigation(): Promise<boolean> {
+            try {
+              // Use provided nextButtonSelector or detect automatically
+              const selectors = effectiveNextButtonSelector ? [effectiveNextButtonSelector] : [
+                'a[rel="next"]:not([disabled])',
+                'link[rel="next"]',
+                'a[aria-label*="Next" i]:not([disabled])',
+                'button[aria-label*="Next" i]:not([disabled])',
+                'a.next:not([disabled])',
+                'button.next:not([disabled])'
+              ]
+
+              for (const sel of selectors) {
+                const success = await page.evaluate((selector) => {
+                  const el = document.querySelector(selector) as HTMLElement
+                  if (el && !el.hasAttribute('disabled')) {
+                    el.click()
+                    return true
+                  }
+                  return false
+                }, sel)
+
+                if (success) {
+                  try {
+                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 })
+                    return true
+                  } catch {
+                    // Check for content change without navigation
+                    const started = Date.now()
+                    while (Date.now() - started < 8000) {
+                      const after = await getListSnapshot()
+                      if (after.href !== before.href || after.count !== before.count || after.firstText !== before.firstText) {
+                        return true
+                      }
+                      await sleep(500)
+                    }
+                  }
+                }
+              }
+              return false
+            } catch {
+              return false
+            }
+          }
+
+          async function handleInfiniteScroll(): Promise<boolean> {
+            try {
+              // Perform auto-scroll to trigger infinite loading
+              await page.evaluate(async () => {
+                await new Promise<void>((resolve) => {
+                  let total = 0
+                  const distance = 600
+                  const timer = setInterval(() => {
+                    const { scrollHeight } = document.body
+                    window.scrollBy(0, distance)
+                    total += distance
+                    if (total >= scrollHeight - window.innerHeight - 200) {
+                      clearInterval(timer)
+                      resolve()
+                    }
+                  }, 120)
+                })
+              })
+              
+              // Try clicking load more if available
+              const loadMoreClicked = await page.evaluate(() => {
+                const candidates = Array.from(document.querySelectorAll('button, a[role="button"], a')) as HTMLElement[]
+                const phrases = ['load more', 'see more', 'show more', 'more results', 'more properties']
+                for (const el of candidates) {
+                  const txt = (el.innerText || el.textContent || '').toLowerCase().trim()
+                  if (!txt || !phrases.some(p => txt.includes(p))) continue
+                  const rect = el.getBoundingClientRect()
+                  if (rect && rect.width > 0 && rect.height > 0) { el.click(); return true }
+                }
+                return false
+              })
+              
+              if (loadMoreClicked) {
+                await sleep(2000)
+              }
+              
+              // Wait for new content
+              const started = Date.now()
+              let latest = before.count
+              while (Date.now() - started < 8000) {
+                const current = await getListSnapshot()
+                if (current.count > before.count) return true
+                latest = current.count
+                await sleep(400)
+              }
+              return latest > before.count
+            } catch {
+              return false
+            }
+          }
+
         } catch {
           return false
         }
