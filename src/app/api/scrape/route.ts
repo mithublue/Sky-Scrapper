@@ -150,6 +150,12 @@ async function acceptCookiesIfPresent(page: puppeteer.Page) {
 
 type PaginationStrategy = 'infinite_scroll' | 'traditional_pagination' | 'load_more_button' | 'auto' | 'none'
 
+type ExclusionFilter = {
+  fieldName: string
+  existingItems: Record<string, any>[]
+  matchType: 'exact' | 'contains' | 'startsWith' | 'endsWith'
+}
+
 type Body = {
   url: string
   mode: Mode
@@ -168,13 +174,14 @@ type Body = {
   paginationStrategy?: PaginationStrategy
   loadMoreSelector?: string
   pageNumberSelectors?: string[]
+  exclusionFilter?: ExclusionFilter
 }
 
 export async function POST(req: Request) {
   let browser: puppeteer.Browser | null = null
   try {
     const body = (await req.json()) as Body
-    const { url, mode, listItemSelector, fields, waitForSelector, timeoutMs, limit, deepSearch, detailUrlFieldName, min, pages, offset, nextButtonSelector, prevButtonSelector, paginationStrategy, loadMoreSelector, pageNumberSelectors } = body
+    const { url, mode, listItemSelector, fields, waitForSelector, timeoutMs, limit, deepSearch, detailUrlFieldName, min, pages, offset, nextButtonSelector, prevButtonSelector, paginationStrategy, loadMoreSelector, pageNumberSelectors, exclusionFilter } = body
 
     if (!url || !/^https?:\/\//i.test(url)) {
       return NextResponse.json({ ok: false, error: 'Valid url is required' }, { status: 400 })
@@ -237,13 +244,22 @@ export async function POST(req: Request) {
       'Upgrade-Insecure-Requests': '1'
     })
 
-    // Additional debugging for selector issues
     if (mode === 'list') {
       console.log('Starting list scraping with configuration:')
       console.log('- URL:', url)
       console.log('- List selector:', listItemSelector)
       console.log('- Fields:', fields.map(f => ({ name: f.name, selector: f.selector, type: f.type, attr: f.attr })))
       console.log('- Pagination strategy:', paginationStrategy)
+      if (exclusionFilter && exclusionFilter.fieldName && exclusionFilter.existingItems.length > 0) {
+        console.log('- Exclusion filter:', {
+          field: exclusionFilter.fieldName,
+          matchType: exclusionFilter.matchType,
+          existingItemsCount: exclusionFilter.existingItems.length,
+          sampleItems: exclusionFilter.existingItems.slice(0, 2).map(item => ({
+            [exclusionFilter.fieldName]: item[exclusionFilter.fieldName]
+          }))
+        })
+      }
     }
     try {
       console.log(`Navigating to: ${url}`)
@@ -316,6 +332,7 @@ export async function POST(req: Request) {
       let currentPage = 1
       let workingSelector = ''
       const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
+      const globalSeenItems = new Set<string>() // Global deduplication across pages
 
       // Auto-detect pagination strategy if not provided
       let detectedPaginationInfo: any = null
@@ -429,10 +446,10 @@ export async function POST(req: Request) {
           // If multiple selectors provided, try each one
           selectorVariants.splice(0, 1, ...listItemSelector.split(',').map(s => s.trim()))
         } else {
-          // Add fallback patterns
+          // Add fallback patterns only if primary selector fails
           selectorVariants.push(
             '[class*="product"]',
-            '[class*="item"]',
+            '[class*="item"]', 
             '[class*="card"]',
             '[class*="result"]',
             'article',
@@ -442,15 +459,18 @@ export async function POST(req: Request) {
         }
         
         let elementsFound = 0
+        let finalSelector = ''
         
-        // Find a selector that actually returns elements
+        // Find the FIRST selector that actually returns elements (no fallback if first works)
         for (const selector of selectorVariants) {
           try {
             const count = await page.$$eval(selector, els => els.length)
             console.log(`Checking selector "${selector}": found ${count} elements`)
             if (count > 0) {
               workingSelector = selector
+              finalSelector = selector
               elementsFound = count
+              console.log(`✓ Using primary selector: "${selector}" (${count} elements)`) 
               break
             }
           } catch (e: any) {
@@ -462,18 +482,21 @@ export async function POST(req: Request) {
           console.log('No working selector found, returning empty array')
           return []
         }
-        
-        console.log(`Using selector: "${workingSelector}" (${elementsFound} elements)`)
-        
-        await page.waitForSelector(workingSelector, { visible: true }).catch(() => {
+        await page.waitForSelector(finalSelector, { visible: true }).catch(() => {
           console.log('waitForSelector failed, proceeding anyway')
         })
         
         // Debug: Check what elements we actually found
         const debugInfo = await page.evaluate((selector) => {
           const elements = Array.from(document.querySelectorAll(selector))
+          // Check for potential duplicates by comparing text content
+          const textContents = elements.map(el => el.textContent?.trim().substring(0, 100))
+          const uniqueTexts = new Set(textContents)
+          
           return {
             totalElements: elements.length,
+            uniqueTextCount: uniqueTexts.size,
+            hasPotentialDuplicates: elements.length !== uniqueTexts.size,
             firstElementHTML: elements[0]?.outerHTML?.substring(0, 500) + '...',
             firstElementText: elements[0]?.textContent?.substring(0, 200) + '...',
             availableSelectors: {
@@ -483,8 +506,12 @@ export async function POST(req: Request) {
               images: elements[0]?.querySelectorAll('img').length || 0
             }
           }
-        }, workingSelector)
-        console.log('Debug info for first element:', debugInfo)
+        }, finalSelector)
+        console.log('Debug info for elements:', debugInfo)
+        
+        if (debugInfo.hasPotentialDuplicates) {
+          console.log('⚠️ Warning: Potential duplicate elements detected. This may cause duplicate results.')
+        }
         // Enhanced loading and content discovery
         try {
           const getCount = async () => {
@@ -578,12 +605,48 @@ export async function POST(req: Request) {
         } catch {}
 
         const pageData = await page.$$eval(
-          workingSelector,
-          (items, fields) => {
+          finalSelector,
+          (items, fields, exclusionFilter) => {
             const elements = Array.from(items as Element[])
             console.log(`Processing ${elements.length} elements with selectors:`, fields.map((f: any) => ({ name: f.name, selector: f.selector })))
             
-            return elements.map((item, index) => {
+            // Helper function to check if item should be excluded
+            const shouldExcludeItem = (item: Element, data: Record<string, any>) => {
+              if (!exclusionFilter || !exclusionFilter.fieldName || !exclusionFilter.existingItems?.length) {
+                return false
+              }
+              
+              const fieldValue = data[exclusionFilter.fieldName]
+              if (!fieldValue || typeof fieldValue !== 'string') {
+                return false
+              }
+              
+              const lowerFieldValue = fieldValue.toLowerCase().trim()
+              
+              return exclusionFilter.existingItems.some((existingItem: any) => {
+                const existingFieldValue = existingItem[exclusionFilter.fieldName]
+                if (!existingFieldValue || typeof existingFieldValue !== 'string') {
+                  return false
+                }
+                
+                const lowerExistingValue = existingFieldValue.toLowerCase().trim()
+                
+                switch (exclusionFilter.matchType) {
+                  case 'exact':
+                    return lowerFieldValue === lowerExistingValue
+                  case 'contains':
+                    return lowerFieldValue.includes(lowerExistingValue) || lowerExistingValue.includes(lowerFieldValue)
+                  case 'startsWith':
+                    return lowerFieldValue.startsWith(lowerExistingValue)
+                  case 'endsWith':
+                    return lowerFieldValue.endsWith(lowerExistingValue)
+                  default:
+                    return lowerFieldValue === lowerExistingValue
+                }
+              })
+            }
+            
+            const extractedData = elements.map((item, index) => {
               const obj: Record<string, any> = { _index: index }
               
               for (const f of fields as any[]) {
@@ -669,8 +732,48 @@ export async function POST(req: Request) {
               
               return obj
             })
+            
+            // Deduplicate based on content similarity
+            const deduplicatedData = []
+            const seenItems = new Set()
+            
+            for (const item of extractedData) {
+              // Create a content hash for deduplication (using multiple fields if available)
+              const contentFields = fields.map((f: any) => f.name)
+              const contentHash = contentFields
+                .map((fieldName: string) => String(item[fieldName] || '').trim())
+                .join('|')
+                .toLowerCase()
+              
+              if (!seenItems.has(contentHash) && contentHash !== '|'.repeat(contentFields.length - 1)) {
+                seenItems.add(contentHash)
+                deduplicatedData.push(item)
+              }
+            }
+            
+            const duplicatesRemoved = extractedData.length - deduplicatedData.length
+            if (duplicatesRemoved > 0) {
+              console.log(`✓ Removed ${duplicatesRemoved} duplicate items during deduplication`)
+            }
+            
+            // Apply exclusion filter to deduplicated data
+            if (exclusionFilter && exclusionFilter.fieldName && exclusionFilter.existingItems?.length) {
+              const beforeCount = deduplicatedData.length
+              const filteredData = deduplicatedData.filter((item) => !shouldExcludeItem(elements[item._index], item))
+              const afterCount = filteredData.length
+              const excludedCount = beforeCount - afterCount
+              
+              if (excludedCount > 0) {
+                console.log(`✓ Exclusion filter applied: excluded ${excludedCount} items based on field '${exclusionFilter.fieldName}' with ${exclusionFilter.matchType} match against ${exclusionFilter.existingItems.length} existing items`)
+              }
+              
+              return filteredData
+            }
+            
+            return deduplicatedData
           },
           fields,
+          exclusionFilter
         )
 
         // Apply global offset skipping across pages
@@ -1014,7 +1117,29 @@ export async function POST(req: Request) {
       // Scrape pages until we satisfy constraints or pages exhausted
       while (true) {
         const batch = await scrapeCurrentPage()
-        aggregate.push(...batch)
+        
+        // Apply global deduplication across pages
+        const globallyFilteredBatch = []
+        for (const item of batch) {
+          // Create content hash for global deduplication
+          const contentFields = fields.map(f => f.name)
+          const contentHash = contentFields
+            .map(fieldName => String(item[fieldName] || '').trim())
+            .join('|')
+            .toLowerCase()
+          
+          if (!globalSeenItems.has(contentHash) && contentHash !== '|'.repeat(contentFields.length - 1)) {
+            globalSeenItems.add(contentHash)
+            globallyFilteredBatch.push(item)
+          }
+        }
+        
+        const duplicatesSkipped = batch.length - globallyFilteredBatch.length
+        if (duplicatesSkipped > 0) {
+          console.log(`✓ Skipped ${duplicatesSkipped} duplicate items across pages`)
+        }
+        
+        aggregate.push(...globallyFilteredBatch)
 
         // Stop if reached max items
         if (typeof maxItems === 'number' && aggregate.length >= maxItems) break

@@ -9,6 +9,12 @@ type Field = {
   attr?: string
 }
 
+type ExclusionFilter = {
+  fieldName: string
+  existingItems: Record<string, any>[]
+  matchType: 'exact' | 'contains' | 'startsWith' | 'endsWith'
+}
+
 type PaginationInfo = {
   type: 'infinite_scroll' | 'traditional_pagination' | 'load_more_button' | 'none'
   nextButtonSelector?: string
@@ -58,6 +64,12 @@ export default function ScrapeForm() {
   const [paginationStrategy, setPaginationStrategy] = React.useState<'auto' | 'infinite_scroll' | 'traditional_pagination' | 'load_more_button' | 'none'>('auto')
   const [customNextSelector, setCustomNextSelector] = React.useState<string>('')
   const [customLoadMoreSelector, setCustomLoadMoreSelector] = React.useState<string>('')
+  const [exclusionFilter, setExclusionFilter] = React.useState<ExclusionFilter>({
+    fieldName: '',
+    existingItems: [],
+    matchType: 'exact'
+  })
+  const [exclusionInput, setExclusionInput] = React.useState<string>('')
 
   const bookingDemo = () => {
     setUrl('https://www.booking.com/searchresults.html?ss=Saudi+Arabia&ssne=Saudi+Arabia&ssne_untouched=Saudi+Arabia&label=gen173nr-10CAEoggI46AdIM1gEaBSIAQGYATO4ARfIAQzYAQPoAQH4AQGIAgGoAgG4AoDA1sUGwAIB0gIkOWY5ZTg1MmItODlkMi00NTYxLTg5MjUtNTIyMWRjYjg1NDRj2AIB4AIB&aid=304142&lang=en-us&sb=1&src_elem=sb&src=index&dest_id=186&dest_type=country&group_adults=2&no_rooms=1&group_children=0')
@@ -69,11 +81,14 @@ export default function ScrapeForm() {
       { name: 'rating', selector: 'div[data-testid="review-score"] div, .review-score, [class*="rating"], [class*="score"]', type: 'text' },
     ])
     setPaginationStrategy('infinite_scroll')
+    // Clear exclusion filter
+    setExclusionFilter({ fieldName: '', existingItems: [], matchType: 'exact' })
+    setExclusionInput('')
   }
 
   const alibabaDemo = () => {
     setUrl('https://www.alibaba.com/search/page?spm=a2700.product_home_fy25.home_login_first_screen_fy23_pc_search_bar.keydown__Enter&SearchScene=proSearch&SearchText=mobile&pro=true&from=pcHomeContent')
-    setListItemSelector('.organic-offer-wrapper, .product-item, [class*="product-card"], .search-card-container, .card-info')
+    setListItemSelector('.organic-offer-wrapper')
     setFields([
       { name: 'title', selector: '.product-title, .title, h2, h3, [class*="title"], [class*="subject"]', type: 'text' },
       { name: 'price', selector: '.price, .product-price, [class*="price"], .offer-price', type: 'text' },
@@ -82,6 +97,26 @@ export default function ScrapeForm() {
       { name: 'link', selector: 'a', type: 'attr', attr: 'href' },
     ])
     setPaginationStrategy('traditional_pagination')
+    // Clear exclusion filter
+    setExclusionFilter({ fieldName: '', existingItems: [], matchType: 'exact' })
+    setExclusionInput('')
+    // Set example exclusion filter for demo
+    const sampleExistingItems = [
+      {
+        "_index": 0,
+        "title": "2025 New Low Price I16 Pro Max Mobile Phones 5g Dual Sim Global Version Smartphone 10 Core 16gb+1tb Large Screen Cell Phones",
+        "price": "$86$17250% offMin. order: 1 piece18 sold",
+        "supplier": "Chenghai (shenzhen) Foreign Trade Technology Co., Ltd.,1 yrCN3.8/5.0 (8)"
+      },
+      {
+        "_index": 1, 
+        "title": "Sample Mobile Phone to Exclude",
+        "price": "$100",
+        "supplier": "Sample Supplier"
+      }
+    ]
+    setExclusionFilter({ fieldName: 'title', existingItems: sampleExistingItems, matchType: 'contains' })
+    setExclusionInput(JSON.stringify(sampleExistingItems, null, 2))
   }
 
   const addField = () => setFields(prev => [...prev, { name: '', selector: '', type: 'text' }])
@@ -98,6 +133,31 @@ export default function ScrapeForm() {
   const applySuggestedListSelector = () => {
     if (!suggestedListItemSelector) return
     setListItemSelector(suggestedListItemSelector)
+  }
+
+  // Handle exclusion filter
+  const updateExclusionItems = (input: string) => {
+    setExclusionInput(input)
+    try {
+      const parsed = JSON.parse(input)
+      if (Array.isArray(parsed)) {
+        // Validate that all items are objects
+        const validItems = parsed.filter(item => 
+          typeof item === 'object' && 
+          item !== null && 
+          !Array.isArray(item)
+        )
+        setExclusionFilter(prev => ({ ...prev, existingItems: validItems }))
+      } else {
+        // Single object case
+        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+          setExclusionFilter(prev => ({ ...prev, existingItems: [parsed] }))
+        }
+      }
+    } catch {
+      // Invalid JSON - clear the filter
+      setExclusionFilter(prev => ({ ...prev, existingItems: [] }))
+    }
   }
 
   
@@ -160,6 +220,7 @@ export default function ScrapeForm() {
         nextButtonSelector: customNextSelector || paginationInfo?.nextButtonSelector,
         loadMoreSelector: customLoadMoreSelector || paginationInfo?.loadMoreSelector,
         pageNumberSelectors: paginationInfo?.pageNumberSelectors,
+        exclusionFilter: exclusionFilter.fieldName && exclusionFilter.existingItems.length > 0 ? exclusionFilter : undefined,
       }
       const res = await fetch('/api/scrape', {
         method: 'POST',
@@ -181,6 +242,62 @@ export default function ScrapeForm() {
     try {
       await navigator.clipboard.writeText(JSON.stringify(result.data, null, 2))
     } catch {}
+  }
+
+  // Download functions
+  const downloadJSON = () => {
+    if (!result?.data) return
+    const blob = new Blob([JSON.stringify(result.data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `scraped-data-${new Date().toISOString().split('T')[0]}.json`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
+  const downloadCSV = () => {
+    if (!result?.data || !Array.isArray(result.data)) return
+    
+    const headers = Object.keys(result.data[0] || {})
+    const csvContent = [
+      headers.join(','),
+      ...result.data.map(row => 
+        headers.map(header => {
+          const value = row[header] ?? ''
+          // Escape quotes and wrap in quotes if contains comma or quote
+          const escaped = String(value).replace(/"/g, '""')
+          return /[,"\n\r]/.test(escaped) ? `"${escaped}"` : escaped
+        }).join(',')
+      )
+    ].join('\n')
+    
+    const blob = new Blob([csvContent], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `scraped-data-${new Date().toISOString().split('T')[0]}.csv`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
+  const downloadXLSX = async () => {
+    if (!result?.data || !Array.isArray(result.data)) return
+    
+    try {
+      const XLSX = await import('xlsx')
+      const worksheet = XLSX.utils.json_to_sheet(result.data)
+      const workbook = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Scraped Data')
+      XLSX.writeFile(workbook, `scraped-data-${new Date().toISOString().split('T')[0]}.xlsx`)
+    } catch (error) {
+      console.error('Error downloading XLSX:', error)
+      alert('Error downloading XLSX file. Please try JSON or CSV instead.')
+    }
   }
 
   return (
@@ -335,6 +452,89 @@ export default function ScrapeForm() {
           </label>
         </div>
 
+        {/* Exclusion Filter Section */}
+        <div className="space-y-3">
+          <div className="text-sm font-medium">🚫 Exclusion Filter (Optional)</div>
+          <div className="rounded border border-gray-200 p-3 space-y-3">
+            <div className="grid gap-3 md:grid-cols-2">
+              <label>
+                <div className="mb-1 text-sm font-medium">Field to Match</div>
+                <select 
+                  value={exclusionFilter.fieldName} 
+                  onChange={e => setExclusionFilter(prev => ({ ...prev, fieldName: e.target.value }))}
+                  className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200"
+                >
+                  <option value="">Select field...</option>
+                  {fields.map(field => (
+                    <option key={field.name} value={field.name}>{field.name}</option>
+                  ))}
+                </select>
+                <div className="mt-1 text-xs text-gray-500">Field to check for exclusion matches</div>
+              </label>
+              
+              <label>
+                <div className="mb-1 text-sm font-medium">Match Type</div>
+                <select 
+                  value={exclusionFilter.matchType} 
+                  onChange={e => setExclusionFilter(prev => ({ ...prev, matchType: e.target.value as any }))}
+                  className="w-full rounded border px-3 py-2 focus:outline-none focus:ring focus:ring-indigo-200"
+                >
+                  <option value="exact">Exact Match</option>
+                  <option value="contains">Contains</option>
+                  <option value="startsWith">Starts With</option>
+                  <option value="endsWith">Ends With</option>
+                </select>
+              </label>
+            </div>
+            
+            <label>
+              <div className="mb-1 text-sm font-medium">Existing Items JSON</div>
+              <textarea
+                value={exclusionInput}
+                onChange={e => updateExclusionItems(e.target.value)}
+                placeholder='[{"_index": 0, "title": "Mobile Phone 1", "price": "$100"}, {"_index": 1, "title": "Mobile Phone 2", "price": "$200"}]'
+                rows={6}
+                className="w-full rounded border px-3 py-2 font-mono text-sm focus:outline-none focus:ring focus:ring-indigo-200"
+              />
+              <div className="mt-1 text-xs text-gray-500">
+                Paste your existing scraped items as JSON array. The scraper will exclude new items that match existing ones.
+                {exclusionFilter.existingItems.length > 0 && (
+                  <div className="mt-1 text-green-600">
+                    ✓ {exclusionFilter.existingItems.length} existing item(s) loaded for comparison
+                  </div>
+                )}
+                {exclusionInput && exclusionFilter.existingItems.length === 0 && (
+                  <div className="mt-1 text-red-600">
+                    ✗ Invalid JSON format. Please check your syntax.
+                  </div>
+                )}
+              </div>
+            </label>
+            
+            {exclusionFilter.fieldName && exclusionFilter.existingItems.length > 0 && (
+              <div className="text-xs text-blue-600 bg-blue-50 p-3 rounded">
+                📝 <strong>Exclusion Preview:</strong><br/>
+                Field: <strong>{exclusionFilter.fieldName}</strong><br/>
+                Match Type: <strong>{exclusionFilter.matchType}</strong><br/>
+                Existing Items: <strong>{exclusionFilter.existingItems.length}</strong><br/>
+                <div className="mt-2">
+                  Sample values to exclude:
+                  <ul className="mt-1 ml-4 list-disc">
+                    {exclusionFilter.existingItems.slice(0, 3).map((item, idx) => (
+                      <li key={idx} className="truncate">
+                        <code>"{item[exclusionFilter.fieldName] || 'N/A'}"</code>
+                      </li>
+                    ))}
+                    {exclusionFilter.existingItems.length > 3 && (
+                      <li>... and {exclusionFilter.existingItems.length - 3} more</li>
+                    )}
+                  </ul>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* Simplified options: Item count and Offset only */}
         <div className="grid gap-3 md:grid-cols-3">
           <label>
@@ -416,7 +616,7 @@ export default function ScrapeForm() {
             </div>
           )}
           <div className="text-xs text-gray-500">
-            🔍 Check browser console for detailed logs
+            🔍 Check browser console for detailed logs (including deduplication info)
           </div>
           {error && <span className="text-sm text-red-600">{error}</span>}
         </div>
@@ -425,8 +625,30 @@ export default function ScrapeForm() {
       {result && (
         <div className="space-y-2 rounded border bg-white p-4 shadow-sm">
           <div className="flex items-center justify-between">
-            <div className="text-sm font-medium">Result {result.mode === 'list' && typeof result.count === 'number' ? `(${result.count} items)` : ''}</div>
-            <button onClick={copyResult} className="rounded border px-2 py-1 text-sm hover:bg-gray-50">Copy JSON</button>
+            <div className="text-sm font-medium">
+              Result {result.mode === 'list' && typeof result.count === 'number' ? `(${result.count} items)` : ''}
+              {exclusionFilter.fieldName && exclusionFilter.existingItems.length > 0 && (
+                <span className="ml-2 text-xs text-blue-600">
+                  🚫 Filtered against {exclusionFilter.existingItems.length} existing items
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={copyResult} className="rounded border px-2 py-1 text-sm hover:bg-gray-50" title="Copy JSON to clipboard">
+                📋 Copy JSON
+              </button>
+              <div className="flex items-center gap-1">
+                <button onClick={downloadJSON} className="rounded bg-blue-600 px-2 py-1 text-sm text-white hover:bg-blue-700" title="Download as JSON">
+                  📄 JSON
+                </button>
+                <button onClick={downloadCSV} className="rounded bg-green-600 px-2 py-1 text-sm text-white hover:bg-green-700" title="Download as CSV">
+                  📈 CSV
+                </button>
+                <button onClick={downloadXLSX} className="rounded bg-orange-600 px-2 py-1 text-sm text-white hover:bg-orange-700" title="Download as Excel">
+                  📉 XLSX
+                </button>
+              </div>
+            </div>
           </div>
           <pre className="max-h-96 overflow-auto rounded bg-gray-900 p-3 text-xs text-gray-100">{JSON.stringify(result.data, null, 2)}</pre>
         </div>
