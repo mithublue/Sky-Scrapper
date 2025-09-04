@@ -63,21 +63,21 @@ export default function ScrapeForm() {
     setUrl('https://www.booking.com/searchresults.html?ss=Saudi+Arabia&ssne=Saudi+Arabia&ssne_untouched=Saudi+Arabia&label=gen173nr-10CAEoggI46AdIM1gEaBSIAQGYATO4ARfIAQzYAQPoAQH4AQGIAgGoAgG4AoDA1sUGwAIB0gIkOWY5ZTg1MmItODlkMi00NTYxLTg5MjUtNTIyMWRjYjg1NDRj2AIB4AIB&aid=304142&lang=en-us&sb=1&src_elem=sb&src=index&dest_id=186&dest_type=country&group_adults=2&no_rooms=1&group_children=0')
     setListItemSelector('div[data-testid="property-card"]')
     setFields([
-      { name: 'name', selector: 'div[data-testid="title"]', type: 'text' },
-      { name: 'link', selector: 'a[data-testid="title-link"]', type: 'attr', attr: 'href' },
-      { name: 'price', selector: 'span[data-testid="price-and-discounted-price"]', type: 'text' },
-      { name: 'rating', selector: 'div[data-testid="review-score"] div', type: 'text' },
+      { name: 'name', selector: 'div[data-testid="title"], h3, h2, .property-title', type: 'text' },
+      { name: 'link', selector: 'a[data-testid="title-link"], h3 a, h2 a, a', type: 'attr', attr: 'href' },
+      { name: 'price', selector: 'span[data-testid="price-and-discounted-price"], .price, [class*="price"]', type: 'text' },
+      { name: 'rating', selector: 'div[data-testid="review-score"] div, .review-score, [class*="rating"], [class*="score"]', type: 'text' },
     ])
     setPaginationStrategy('infinite_scroll')
   }
 
   const alibabaDemo = () => {
     setUrl('https://www.alibaba.com/search/page?spm=a2700.product_home_fy25.home_login_first_screen_fy23_pc_search_bar.keydown__Enter&SearchScene=proSearch&SearchText=mobile&pro=true&from=pcHomeContent')
-    setListItemSelector('.organic-offer-wrapper, .product-item, [class*="product-card"], .search-card-container')
+    setListItemSelector('.organic-offer-wrapper, .product-item, [class*="product-card"], .search-card-container, .card-info')
     setFields([
-      { name: 'title', selector: '.product-title, .title, h2, h3, [class*="title"]', type: 'text' },
-      { name: 'price', selector: '.price, .product-price, [class*="price"]', type: 'text' },
-      { name: 'supplier', selector: '.supplier, .company-name, [class*="supplier"]', type: 'text' },
+      { name: 'title', selector: '.product-title, .title, h2, h3, [class*="title"], [class*="subject"]', type: 'text' },
+      { name: 'price', selector: '.price, .product-price, [class*="price"], .offer-price', type: 'text' },
+      { name: 'supplier', selector: '.supplier, .company-name, [class*="supplier"], [class*="company"]', type: 'text' },
       { name: 'image', selector: 'img', type: 'attr', attr: 'src' },
       { name: 'link', selector: 'a', type: 'attr', attr: 'href' },
     ])
@@ -415,6 +415,9 @@ export default function ScrapeForm() {
               🔄 Will navigate through pages using {paginationStrategy.replace('_', ' ')} strategy
             </div>
           )}
+          <div className="text-xs text-gray-500">
+            🔍 Check browser console for detailed logs
+          </div>
           {error && <span className="text-sm text-red-600">{error}</span>}
         </div>
       </form>

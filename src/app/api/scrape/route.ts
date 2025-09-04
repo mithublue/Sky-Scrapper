@@ -237,7 +237,14 @@ export async function POST(req: Request) {
       'Upgrade-Insecure-Requests': '1'
     })
 
-    // Enhanced navigation with retry and error handling
+    // Additional debugging for selector issues
+    if (mode === 'list') {
+      console.log('Starting list scraping with configuration:')
+      console.log('- URL:', url)
+      console.log('- List selector:', listItemSelector)
+      console.log('- Fields:', fields.map(f => ({ name: f.name, selector: f.selector, type: f.type, attr: f.attr })))
+      console.log('- Pagination strategy:', paginationStrategy)
+    }
     try {
       console.log(`Navigating to: ${url}`)
       await page.goto(url, { waitUntil: 'networkidle2', timeout: navTimeout })
@@ -461,6 +468,23 @@ export async function POST(req: Request) {
         await page.waitForSelector(workingSelector, { visible: true }).catch(() => {
           console.log('waitForSelector failed, proceeding anyway')
         })
+        
+        // Debug: Check what elements we actually found
+        const debugInfo = await page.evaluate((selector) => {
+          const elements = Array.from(document.querySelectorAll(selector))
+          return {
+            totalElements: elements.length,
+            firstElementHTML: elements[0]?.outerHTML?.substring(0, 500) + '...',
+            firstElementText: elements[0]?.textContent?.substring(0, 200) + '...',
+            availableSelectors: {
+              titles: elements[0]?.querySelectorAll('h1, h2, h3, h4, [class*="title"], [data-testid*="title"]').length || 0,
+              links: elements[0]?.querySelectorAll('a').length || 0,
+              prices: elements[0]?.querySelectorAll('[class*="price"], [data-testid*="price"]').length || 0,
+              images: elements[0]?.querySelectorAll('img').length || 0
+            }
+          }
+        }, workingSelector)
+        console.log('Debug info for first element:', debugInfo)
         // Enhanced loading and content discovery
         try {
           const getCount = async () => {
@@ -557,39 +581,92 @@ export async function POST(req: Request) {
           workingSelector,
           (items, fields) => {
             const elements = Array.from(items as Element[])
-            console.log(`Processing ${elements.length} elements`)
+            console.log(`Processing ${elements.length} elements with selectors:`, fields.map((f: any) => ({ name: f.name, selector: f.selector })))
+            
             return elements.map((item, index) => {
               const obj: Record<string, any> = { _index: index }
+              
               for (const f of fields as any[]) {
                 let value: any = null
+                
                 try {
-                  // Handle multiple selectors separated by commas
-                  const selectors = f.selector.split(',').map((s: string) => s.trim())
-                  let target: Element | null = null
+                  // Handle single selector or multiple selectors separated by commas
+                  const selectorList = f.selector && f.selector.includes(',') 
+                    ? f.selector.split(',').map((s: string) => s.trim()).filter((s: string) => s.length > 0)
+                    : f.selector ? [f.selector.trim()] : []
                   
-                  for (const sel of selectors) {
-                    target = sel ? item.querySelector(sel) : item
-                    if (target) break
+                  let target: Element | null = null
+                  let usedSelector = ''
+                  
+                  // Try each selector until we find a match
+                  for (const selector of selectorList) {
+                    if (!selector) continue
+                    
+                    try {
+                      target = item.querySelector(selector)
+                      if (target) {
+                        usedSelector = selector
+                        break
+                      }
+                    } catch (e) {
+                      // Continue to next selector if this one fails
+                      continue
+                    }
+                  }
+                  
+                  // If no specific selector worked and we're looking for text, try the item itself
+                  if (!target && f.type === 'text' && selectorList.length === 0) {
+                    target = item
+                    usedSelector = 'item itself'
                   }
                   
                   if (target) {
                     if (f.type === 'text') {
-                      value = target.textContent?.trim() ?? null
-                    } else if (f.type === 'attr' && f.attr) {
-                      value = target.getAttribute(f.attr)
-                      // Handle relative URLs
-                      if (f.attr === 'href' && value && !value.startsWith('http')) {
-                        try {
-                          value = new URL(value, window.location.href).href
-                        } catch {}
+                      const textContent = target.textContent?.trim()
+                      value = textContent && textContent.length > 0 ? textContent : null
+                      if (value && index === 0) {
+                        console.log(`✓ Field '${f.name}' extracted using '${usedSelector}': "${value.substring(0, 50)}${value.length > 50 ? '...' : ''}"`)
                       }
+                    } else if (f.type === 'attr' && f.attr) {
+                      const attrValue = target.getAttribute(f.attr)
+                      if (attrValue) {
+                        // Handle relative URLs for href attributes
+                        if (f.attr === 'href' && !attrValue.startsWith('http')) {
+                          try {
+                            value = new URL(attrValue, window.location.href).href
+                          } catch {
+                            value = attrValue
+                          }
+                        } else {
+                          value = attrValue
+                        }
+                        
+                        if (index === 0) {
+                          console.log(`✓ Field '${f.name}' attribute '${f.attr}' extracted using '${usedSelector}': "${value.substring(0, 50)}${value.length > 50 ? '...' : ''}"`)
+                        }
+                      }
+                    }
+                  } else {
+                    if (index === 0) {
+                      console.log(`✗ Field '${f.name}' not found. Tried selectors: ${selectorList.join(', ')}`)
+                      // Debug: show available elements in the first item
+                      const availableElements = {
+                        allElements: item.querySelectorAll('*').length,
+                        headings: Array.from(item.querySelectorAll('h1, h2, h3, h4, h5')).map(el => el.tagName + (el.className ? '.' + el.className : '')),
+                        links: Array.from(item.querySelectorAll('a')).map(el => 'a' + (el.className ? '.' + el.className : '') + (el.getAttribute('data-testid') ? '[data-testid="' + el.getAttribute('data-testid') + '"]' : '')),
+                        dataTestIds: Array.from(item.querySelectorAll('[data-testid]')).map(el => el.tagName.toLowerCase() + '[data-testid="' + el.getAttribute('data-testid') + '"]'),
+                        spans: Array.from(item.querySelectorAll('span')).slice(0, 5).map(el => 'span' + (el.className ? '.' + el.className.split(' ').slice(0, 2).join('.') : '') + (el.getAttribute('data-testid') ? '[data-testid="' + el.getAttribute('data-testid') + '"]' : ''))
+                      }
+                      console.log(`Available elements in first item for '${f.name}':`, availableElements)
                     }
                   }
                 } catch (e) {
                   console.log(`Error extracting field ${f.name}:`, e)
                 }
+                
                 obj[f.name] = value
               }
+              
               return obj
             })
           },
